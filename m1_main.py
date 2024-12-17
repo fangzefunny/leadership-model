@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import multiprocessing as mp
 from scipy.optimize import minimize
+from scipy.special import erf
 
 # the path to the current file 
 pth = os.path.dirname(os.path.abspath(__file__))
@@ -14,11 +15,11 @@ eps_, max_ = 1e-12, 1e12
 
 # -----------------------  Model ------------------------ #
 
-class prospect_model:
-    name = 'prospect_model'
-    p_bnds   = [( 0, 1), (1, 50), ( 0, 1), (0, 50)]
-    p_pbnds  = [(.1,.9), (1, 8),  (.1,.9),  (1, 8)]
-    p_names  = ['alpha', 'lmbda', 'gamma', 'tau']  
+class prospect_delegation:
+    name = 'prospect_delegation'
+    p_bnds   = [( 0, 1), ( 0, 1), (eps_, 50), ( 0, 1), (0, 10), (0, 10), (0, 10)]
+    p_pbnds  = [(.1,.8), (.1,.8), (.5,  2),   (.1,.8), (1, 3), (1, 3), (1, 3)]
+    p_names  = ['theta', 'lmbda', 'gamma', 'tau', 'b', 'kappa', 'sigma']  
     p_poi    = p_names
     p_priors = []
     p_trans  = []
@@ -27,24 +28,27 @@ class prospect_model:
 
     def __init__(self, nA, params):
         self.nA = nA
-        self.params(params)
+        self.load_params(params)
 
     def load_params(self, params):
         self.theta = params[0]
-        self.alpha = params[1]
-        self.lmbda = params[2]
-        self.gamma = params[3]
-        self.tau   = params[4]
+        self.alpha = .9#params[1]
+        self.lmbda = params[1]
+        self.gamma = params[2]
+        self.tau   = params[3]
+        self.b     = params[4]
+        self.kappa = params[5]
+        self.sigma = params[6]
 
-    def policy(self, x_gain, x_loss, z_gain, z_loss, z_amb):
+    def policy(self, z_gain, z_loss, z_uncertain, x_gain=10, x_loss=-10):
         '''Make a choice
 
-        x_gain: the gain for the current trial
-        x_loss: the loss for the current trial
-        eta: the probability of gain 
+        z_gain: the gain for the current trial
+        z_loss: the loss for the current trial
+        z_uncertain: the uncertainty for the current trial
         '''
         # calculate the probability of gain & loss 
-        eta = z_gain*1 + z_loss*0 + z_amb*self.theta
+        eta = (z_gain*1 + z_loss*0 + z_uncertain*self.theta) / 10
         numer = eta**self.gamma
         denom = (eta**self.gamma + (1-eta)**self.gamma)**(1/self.gamma)
         pi_gain = numer/denom
@@ -52,15 +56,25 @@ class prospect_model:
 
         # calculate the subjective value of gain & loss 
         self.v_gain = x_gain**self.alpha
-        self.v_loss = self.lmbda*(-x_loss)**self.alpha
+        self.v_loss = -self.lmbda*(-x_loss)**self.alpha
 
         # calculate the utility
         self.u = pi_gain*self.v_gain - pi_loss*self.v_loss
 
         # calculate the decision policy 
-        p_gain = 1/(1 + np.exp(-self.tau*self.u))
-        p_loss = 1 - p_gain
-        return np.array([p_loss, p_gain])
+        p_fish_tmp = 1/(1 + np.exp(-self.tau*self.u))
+
+        # calculate the defer rate
+        m1 = (self.u+self.b+self.kappa)/(self.sigma+eps_)/np.sqrt(2)
+        m2 = (self.u+self.b-self.kappa)/(self.sigma+eps_)/np.sqrt(2)
+        p_defer = .5*(erf(m1) - erf(m2))
+
+        # calculate the fishing/not fishing rate 
+        p_fish = p_fish_tmp*(1-p_defer)
+        p_safe = (1-p_defer)*(1-p_fish)
+        pi = np.array([p_fish, p_defer, p_safe])
+        pi /= pi.sum()
+        return pi
     
 # ----------------- Likelihood function ----------------- #
 
@@ -87,13 +101,11 @@ def loss_fn(params, sub_data, model_name, method='mle'):
 
         for _, row in block_data.iterrows():
             # make a decision 
-            x_gain = row['x_gain']
-            x_loss = row['x_loss']
-            z_gain = row['z_gain']
-            z_loss = row['z_loss']
-            z_amb  = row['z_amb']
-            a      = row['a']
-            pi = subj.policy(x_gain, x_loss, z_gain, z_loss, z_amb)
+            z_gain = row['Zgain']
+            z_loss = row['Zloss']
+            z_uncertain = row['Uncertainty']
+            a = row['Fishing']
+            pi = subj.policy(z_gain, z_loss, z_uncertain)
             ll += np.log(pi[a]+eps_)
     loss = -ll
 
@@ -152,7 +164,7 @@ def fit(loss_fn, sub_data, model_name,
         print(f'''  Fitted params: {x_min}, 
                     NLL: {result.fun}''')
     fit_res = {}
-    fit_res['log_post']   = result.fun
+    fit_res['log_post']   = -result.fun
     fit_res['log_like']   = -loss_fn(x_min, sub_data, model_name, method)
     fit_res['param']      = x_min
     fit_res['param_name'] = p_name
@@ -195,10 +207,10 @@ def fit_parallel(data_set, model_name, method='mle', alg='Nelder-Mead',
         if sub_id not in fitted_sub_lst:  
             print(f'Fitting {model_name} subj {sub_id}, progress: {(done_subj*100)/all_subj:.2f}%')
             # put the loss into the computing pool
-            results = [pool.apply_async(loss_fn, args=(data[sub_id], model_name,
-                                            eval(model_name).bnds, 
-                                            eval(model_name).pbnds, 
-                                            eval(model_name).p_name, 
+            results = [pool.apply_async(fit, args=(loss_fn, data[sub_id], model_name,
+                                            eval(model_name).p_bnds, 
+                                            eval(model_name).p_pbnds, 
+                                            eval(model_name).p_names, 
                                             method, alg, seed+2*i, verbose))
                                             for i in range(n_fits)]
             # find the best fit result
@@ -257,13 +269,11 @@ def inference(data_set, model_name):
 
             for t, row in block_data.iterrows():
                 # make a decision 
-                x_gain = row['x_gain']
-                x_loss = row['x_loss']
-                z_gain = row['z_gain']
-                z_loss = row['z_loss']
-                z_amb  = row['z_amb']
-                a      = row['a']
-                pi = subj.policy(x_gain, x_loss, z_gain, z_loss, z_amb)
+                z_gain = row['Zgain']
+                z_loss = row['Zloss']
+                z_uncertain = row['Uncertainty']
+                a = row['Fishing']
+                pi = subj.policy(z_gain, z_loss, z_uncertain)
                 
                 # store the hidden variables 
                 pred_data.loc[t, 'll'] = np.log(pi[a]+eps_)
@@ -282,7 +292,7 @@ def inference(data_set, model_name):
 if __name__ == '__main__':
 
     data_set = 'leadership_data'
-    model_name = 'prospect_model'
+    model_name = 'prospect_delegation'
     n_fits, n_cores = 40, 40
 
     # 1. fit the prospect model
