@@ -24,7 +24,7 @@ class prospect_delegation:
     p_priors = []
     p_trans  = []
     n_params = len(p_names)
-    hidden_vars = ['v_gain', 'v_loss', 'u']
+    hidden_vars = ['v_gain', 'v_loss', 'u', 'p_fish', 'p_defer', 'p_safe']
 
     def __init__(self, nA, params):
         self.nA = nA
@@ -40,7 +40,7 @@ class prospect_delegation:
         self.kappa = params[5]
         self.sigma = params[6]
 
-    def policy(self, z_gain, z_loss, z_uncertain, x_gain=10, x_loss=-10):
+    def policy(self, z_gain, z_loss, z_uncertain, x_gain=20, x_loss=-20):
         '''Make a choice
 
         z_gain: the gain for the current trial
@@ -67,12 +67,12 @@ class prospect_delegation:
         # calculate the defer rate
         m1 = (self.u+self.b+self.kappa)/(self.sigma+eps_)/np.sqrt(2)
         m2 = (self.u+self.b-self.kappa)/(self.sigma+eps_)/np.sqrt(2)
-        p_defer = .5*(erf(m1) - erf(m2))
+        self.p_defer = .5*(erf(m1) - erf(m2))
 
         # calculate the fishing/not fishing rate 
-        p_fish = p_fish_tmp*(1-p_defer)
-        p_safe = (1-p_defer)*(1-p_fish)
-        pi = np.array([p_fish, p_defer, p_safe])
+        self.p_fish = p_fish_tmp*(1-self.p_defer)
+        self.p_safe = (1-self.p_defer)*(1-self.p_fish)
+        pi = np.array([self.p_fish, self.p_defer, self.p_safe])
         pi /= pi.sum()
         return pi
     
@@ -90,22 +90,22 @@ def loss_fn(params, sub_data, model_name, method='mle'):
     '''
     
     # instantiate the subject model
-    nA = 2 # the number of possible choices
+    nA = 3 # the number of possible choices
     model = eval(model_name)
+    # instantiate the subject model for the block 
+    subj = model(nA, params)
    
     # calculate the likelihood of the data
     ll = 0 
     for _, block_data in sub_data.items():
-        # instantiate the subject model for the block 
-        subj = model(nA, params)
-
+        
         for _, row in block_data.iterrows():
             # make a decision 
             z_gain = row['Zgain']
             z_loss = row['Zloss']
             z_uncertain = row['Uncertainty']
-            a = row['Fishing']
             pi = subj.policy(z_gain, z_loss, z_uncertain)
+            a = row['Fishing']
             ll += np.log(pi[a]+eps_)
     loss = -ll
 
@@ -215,7 +215,7 @@ def fit_parallel(data_set, model_name, method='mle', alg='Nelder-Mead',
                                             for i in range(n_fits)]
             # find the best fit result
             opt_val   = np.inf 
-            losses, tol = [], 1e-2,
+            losses, tol = [], 1e-3
             for p in results:
                 res = p.get()
                 losses.append(-res['log_post'])
@@ -293,7 +293,7 @@ if __name__ == '__main__':
 
     data_set = 'leadership_data'
     model_name = 'prospect_delegation'
-    n_fits, n_cores = 40, 40
+    n_fits, n_cores = 150, 40
 
     # 1. fit the prospect model
     fit_parallel(data_set, model_name, n_fits=n_fits, n_cores=n_cores)
