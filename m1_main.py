@@ -6,6 +6,7 @@ import pandas as pd
 import multiprocessing as mp
 from scipy.optimize import minimize
 from scipy.special import erf
+from scipy.stats import norm, uniform, gamma, halfnorm
 
 # the path to the current file 
 pth = os.path.dirname(os.path.abspath(__file__))
@@ -22,25 +23,31 @@ def clip_exp(x):
 
 class prospect_delegation:
     name = 'prospect_delegation'
-    p_bnds   = [( 0, 1),   (0,    2), (1e-3, 2), ( 0, 1), (-10, 10), (0, 10), (0, 10)]
-    p_pbnds  = [(.1,.8), (1.1, 1.5), (.3,   2), (.1,.8), ( -3,  3), (1,  3), (1,  3)]
+    p_bnds   = [( 0, 1), (1,   4), (1e-3, 2), (0, 30), (-10, 10), (0, 10), (0, 10)]
+    p_pbnds  = [(.1,.8), (1, 1.5), (.5, 1.5), (1, 5), (-1,  1), (1e-3,  1), (1e-3,  1)]
     p_names  = ['theta', 'lmbda', 'gamma', 'tau', 'b', 'kappa', 'sigma']  
     p_poi    = p_names
-    p_priors = []
+    p_priors = [uniform(0, 1), 
+                uniform(0, 2), 
+                uniform(0, 4), 
+                gamma(2, 3), 
+                norm(0, 2),
+                halfnorm(0, 2), 
+                halfnorm(0, 2)]
     p_trans  = [lambda x: 1/(1+clip_exp(-x)), 
+                lambda x: 1e-3 + 2/(1+clip_exp(-x)), 
+                lambda x: 1e-3 + 4/(1+clip_exp(-x)), 
                 lambda x: clip_exp(x), 
-                lambda x: 1e-3 + 3/(1+clip_exp(-x)), 
-                lambda x: 1/(1+clip_exp(-x)), 
-                lambda x: x, 
+                lambda x: x,
                 lambda x: clip_exp(x), 
                 lambda x: clip_exp(x)]
     p_links  = [lambda x: np.log(x+eps_)-np.log(1-x+eps_), 
-                lambda x: np.log(x), 
-                lambda x: np.log(x-1e-3+eps_)-np.log(3-(x-1e-3)+eps_), 
-                lambda x: np.log(x+eps_)-np.log(1-x+eps_), 
+                lambda x: np.log((x-1e-3))-np.log(2-(x-1e-3)), 
+                lambda x: np.log((x-1e-3))-np.log(4-(x-1e-3)), 
+                lambda x: np.log(x+eps_), 
                 lambda x: x, 
-                lambda x: np.log(x), 
-                lambda x: np.log(x)]
+                lambda x: np.log(x+eps_), 
+                lambda x: np.log(x+eps_)]
     n_params = len(p_names)
     hidden_vars = ['v_gain', 'v_loss', 'u', 'p_fish', 'p_defer', 'p_safe', 'SubjectiveValue']
 
@@ -59,7 +66,7 @@ class prospect_delegation:
         self.kappa = params[5]
         self.sigma = params[6]
 
-    def policy(self, z_gain, z_loss, z_uncertain, x_gain=20, x_loss=-20):
+    def policy(self, z_gain, z_loss, z_uncertain, x_gain=1, x_loss=-1):
         '''Make a choice
 
         z_gain: the gain for the current trial
@@ -78,12 +85,12 @@ class prospect_delegation:
         self.v_loss = -self.lmbda*(-x_loss)**self.alpha
 
         # calculate the utility
-        self.u = pi_gain*self.v_gain - pi_loss*self.v_loss
+        self.u = pi_gain*self.v_gain + pi_loss*self.v_loss
 
-        self.SubjectiveValue = pi_gain*self.v_gain + pi_loss*self.v_loss
+        self.SubjectiveValue = self.u
 
         # calculate the decision policy 
-        p_fish_tmp = 1/(1 + np.exp(-self.tau*self.u))
+        p_fish_tmp = 1/(1 + clip_exp(-self.tau*self.u))
 
         # calculate the defer rate
         m1 = (self.u/(self.sigma+eps_)/np.sqrt(2))+self.b+self.kappa
@@ -92,7 +99,7 @@ class prospect_delegation:
 
         # calculate the fishing/not fishing rate 
         self.p_fish = p_fish_tmp*(1-self.p_defer)
-        self.p_safe = (1-self.p_defer)*(1-self.p_fish)
+        self.p_safe = (1-self.p_defer)*(1-p_fish_tmp)
         pi = np.array([self.p_fish, self.p_defer, self.p_safe])
         pi /= pi.sum()
         return pi
@@ -136,8 +143,8 @@ def loss_fn(params, sub_data, model_name, method='mle'):
     # if method=='map', add log prior loss 
     if method=='map':
         lpr = 0
-        for pri, param in zip(model.p_priors, params):
-            lpr += np.max([pri.logpdf(param), -max_])
+        for pri, fn, param in zip(model.p_priors, model.p_trans, params):
+            lpr += np.max([pri.logpdf(fn(param)), -max_])
         loss += -lpr
     
     return loss 
@@ -291,7 +298,9 @@ def inference(data_set, model_name, method='mle'):
     for sub_id, sub_data in data.items():
         # get the fitted params for inference
         fitted_params = fit_sub_info[sub_id]['param']
-    
+        # fitted_params = [.5, 1, 1, 2, 1, 1, .1]
+        # fitted_params = [f(p) for p, f in zip(fitted_params, model.p_links)]
+
         for sub_id in sub_data.keys():
             # instantiate the subject model
             block_data = sub_data[sub_id].copy()
@@ -330,12 +339,12 @@ def inference(data_set, model_name, method='mle'):
 
 if __name__ == '__main__':
 
-    data_set = 'leadership_data'
+    data_sets = ['leadership_data'] # 
     model_name = 'prospect_delegation'
     alg = 'BFGS'
-    n_fits, n_cores = 200, 40
+    n_fits, n_cores = 100, 50
 
-    for data_set in ['leadership_data', 'leadership_data_type1', 'leadership_data_type2']:
+    for data_set in data_sets:
 
         # 1. fit the prospect delegation model
         fit_parallel(data_set, model_name, n_fits=n_fits, n_cores=n_cores, alg=alg)

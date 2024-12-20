@@ -2,3 +2,4 @@ raw_data/
 data/
 notes/
 *.log
+__pycache__/
