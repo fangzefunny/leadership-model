@@ -15,11 +15,21 @@ def preprocess_data():
     data_for_fit, data_type1_for_fit, data_type2_for_fit = {}, {}, {}
     for sub_folder in sub_folders:
         block_data, block_data_type1, block_data_type2 = {}, {}, {}
+        # Check if the number of files in the sub_folder is less than 5
+        files_in_folder = [f for f in os.listdir(f'{data_pth}/{sub_folder}') if f.startswith('run') and f.endswith('.txt')]
+        # Sort the files to ensure consistent order
+        files_in_folder.sort(key=lambda x: int(x.replace('run', '').replace('.txt', '')))
+        # Check if the folder contains exactly the required run files
+        required_files = ['run1.txt', 'run2.txt', 'run3.txt', 'run4.txt']
+        if sorted(files_in_folder) != sorted(required_files):
+            continue
         for i in range(1, 5):
             fname = f'{data_pth}/{sub_folder}/run{i}.txt'
             datum = pd.read_csv(fname, sep='\t')
             datum.rename(columns={'SubjectiveValue': 'ObjectiveValue'}, inplace=True)
             datum.drop(columns=['Unnamed: 9'], inplace=True)
+            # Skip empty dataframes
+            if datum.shape[0] == 0: continue
             # reverse engineering the z_gain, z_loss, z_uncertain
             def reverse_engineering(row):
                 uncertain = row['Uncertainty']
@@ -43,6 +53,7 @@ def preprocess_data():
         data_for_fit[sub_folder] = block_data
         data_type1_for_fit[sub_folder] = block_data_type1
         data_type2_for_fit[sub_folder] = block_data_type2
+        print(f'{sub_folder} has {len(files_in_folder)} runs')
 
     # data for analysis 
     data = pd.concat(data)
